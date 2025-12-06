@@ -1,0 +1,217 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  lint:
+    name: Lint and Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Lua
+        uses: leafo/gh-actions-lua@v10
+        with:
+          luaVersion: "5.1"
+
+      - name: Setup LuaRocks
+        uses: leafo/gh-actions-luarocks@v4
+
+      - name: Install luacheck
+        run: luarocks install luacheck
+
+      - name: Run luacheck
+        run: |
+          luacheck lua/ ftdetect/ --globals vim --read-globals-from-std --no-max-line-length
+
+      - name: Check Lua syntax
+        run: |
+          find . -name "*.lua" -type f -exec lua -e "dofile('{}')" \; 2>&1 | tee syntax-check.log
+          if grep -q "error" syntax-check.log; then
+            echo "Syntax errors found"
+            exit 1
+          fi
+
+  structure:
+    name: Validate Plugin Structure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check required directories exist
+        run: |
+          test -d lua/lumos || { echo "Missing lua/lumos directory"; exit 1; }
+          test -d ftdetect || { echo "Missing ftdetect directory"; exit 1; }
+          test -d queries/lumos || { echo "Missing queries/lumos directory"; exit 1; }
+
+      - name: Check required files exist
+        run: |
+          test -f lua/lumos/init.lua || { echo "Missing lua/lumos/init.lua"; exit 1; }
+          test -f lua/lumos/lsp.lua || { echo "Missing lua/lumos/lsp.lua"; exit 1; }
+          test -f ftdetect/lumos.lua || { echo "Missing ftdetect/lumos.lua"; exit 1; }
+          test -f queries/lumos/highlights.scm || { echo "Missing queries/lumos/highlights.scm"; exit 1; }
+
+      - name: Validate Tree-sitter queries
+        run: |
+          # Check for basic Tree-sitter query syntax
+          for file in queries/**/*.scm; do
+            if [ -f "$file" ]; then
+              echo "Checking $file..."
+              # Basic validation - ensure parentheses are balanced
+              python3 -c "
+          import sys
+          content = open('$file').read()
+          if content.count('(') != content.count(')'):
+              print(f'Unbalanced parentheses in $file')
+              sys.exit(1)
+          if content.count('[') != content.count(']'):
+              print(f'Unbalanced brackets in $file')
+              sys.exit(1)
+          "
+            fi
+          done
+
+      - name: Check for common issues
+        run: |
+          # Check for leftover debug statements
+          if grep -r "print(" lua/ ftdetect/ 2>/dev/null; then
+            echo "Warning: Found debug print() statements"
+            # Don't fail, just warn
+          fi
+
+          # Check for TODO/FIXME comments
+          if grep -rn "TODO\|FIXME\|XXX\|HACK" lua/ ftdetect/ 2>/dev/null; then
+            echo "Info: Found TODO/FIXME comments (review recommended)"
+            # Don't fail, just inform
+          fi
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        nvim_version: ['stable', 'nightly']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.nvim_version }}
+
+      - name: Verify Neovim installation
+        run: nvim --version
+
+      - name: Test plugin loading
+        run: |
+          # Create minimal init.lua
+          cat > test_init.lua << 'EOF'
+          -- Add plugin to runtimepath
+          vim.opt.runtimepath:prepend('.')
+
+          -- Try to load the plugin
+          local ok, lumos = pcall(require, 'lumos')
+          if not ok then
+            print("ERROR: Failed to load lumos plugin: " .. tostring(lumos))
+            vim.cmd('cquit 1')
+          end
+
+          -- Try to call setup
+          local setup_ok, setup_err = pcall(lumos.setup, {})
+          if not setup_ok then
+            print("ERROR: Failed to call lumos.setup(): " .. tostring(setup_err))
+            vim.cmd('cquit 1')
+          end
+
+          print("SUCCESS: Plugin loaded successfully")
+          vim.cmd('qall!')
+          EOF
+
+          # Run Neovim headless with the test init file
+          nvim --headless -u test_init.lua 2>&1 | tee nvim-output.log
+
+          # Check for errors
+          if grep -q "ERROR" nvim-output.log; then
+            echo "Plugin loading failed"
+            cat nvim-output.log
+            exit 1
+          fi
+
+          if ! grep -q "SUCCESS" nvim-output.log; then
+            echo "Plugin loading did not complete successfully"
+            cat nvim-output.log
+            exit 1
+          fi
+
+      - name: Test file type detection
+        run: |
+          # Create a test .lumos file
+          cat > test.lumos << 'EOF'
+          #[solana]
+          #[account]
+          struct TestAccount {
+              owner: PublicKey,
+              balance: u64,
+          }
+          EOF
+
+          # Test that filetype is set correctly
+          cat > test_ft.lua << 'EOF'
+          vim.opt.runtimepath:prepend('.')
+
+          -- Open the test file
+          vim.cmd('edit test.lumos')
+
+          -- Check filetype
+          local ft = vim.bo.filetype
+          if ft ~= 'lumos' then
+            print("ERROR: Filetype is '" .. ft .. "' but expected 'lumos'")
+            vim.cmd('cquit 1')
+          end
+
+          print("SUCCESS: Filetype detection works")
+          vim.cmd('qall!')
+          EOF
+
+          nvim --headless -u test_ft.lua 2>&1 | tee ft-output.log
+
+          if grep -q "ERROR" ft-output.log; then
+            echo "Filetype detection failed"
+            cat ft-output.log
+            exit 1
+          fi
+
+          if ! grep -q "SUCCESS" ft-output.log; then
+            echo "Filetype detection test did not complete"
+            cat ft-output.log
+            exit 1
+          fi
+
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [lint, structure, integration]
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          echo "Lint: ${{ needs.lint.result }}"
+          echo "Structure: ${{ needs.structure.result }}"
+          echo "Integration: ${{ needs.integration.result }}"
+
+          if [ "${{ needs.lint.result }}" != "success" ] || \
+             [ "${{ needs.structure.result }}" != "success" ] || \
+             [ "${{ needs.integration.result }}" != "success" ]; then
+            echo "One or more CI jobs failed"
+            exit 1
+          fi
+
+          echo "All CI checks passed!"

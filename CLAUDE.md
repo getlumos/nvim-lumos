@@ -1,8 +1,9 @@
 # CLAUDE.md - nvim-lumos
 
+> **Ecosystem Context:** See [getlumos/lumos/CLAUDE.md](https://github.com/getlumos/lumos/blob/main/CLAUDE.md) for LUMOS ecosystem overview, cross-repo standards, and shared guidelines.
+
 **Repository:** https://github.com/getlumos/nvim-lumos
-**Ecosystem:** Part of LUMOS language tooling
-**For ecosystem context:** See [lumos/CLAUDE.md](https://github.com/getlumos/lumos/blob/main/CLAUDE.md)
+**Purpose:** Neovim plugin for LUMOS schema language with Tree-sitter + LSP
 
 ---
 
